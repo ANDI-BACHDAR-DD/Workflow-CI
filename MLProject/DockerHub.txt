@@ -1,0 +1,8 @@
+Docker Hub Image:
+https://hub.docker.com/r/<username>/heart-disease-model
+
+Tag: latest
+Pull command: docker pull <username>/heart-disease-model:latest
+
+Running command:
+docker run -p 5002:5002 <username>/heart-disease-model:latest

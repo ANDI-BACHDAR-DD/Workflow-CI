@@ -1,0 +1,25 @@
+name: heart_disease_prediction
+
+conda_env: conda.yaml
+
+entry_points:
+  main:
+    parameters:
+      data_dir:
+        type: str
+        default: heart_disease_preprocessing
+      n_estimators:
+        type: int
+        default: 100
+      max_depth:
+        type: int
+        default: 10
+      learning_rate:
+        type: float
+        default: 0.1
+    command: >
+      python modelling.py
+        --data_dir {data_dir}
+        --n_estimators {n_estimators}
+        --max_depth {max_depth}
+        --learning_rate {learning_rate}
