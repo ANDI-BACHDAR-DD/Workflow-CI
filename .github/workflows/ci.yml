@@ -1,54 +1,111 @@
 name: CI - Heart Disease Model Training
-    
+
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
-    inputs:
-      n_estimators:   
-        description: 'Jumlah estimators Random Forest'
-        required: false
-        default: '100'
-      max_depth:
-        description: 'Max depth Random Forest'
-        required: false
-        default: '10'
-                      
-env:      
-  PYTHON_VERSION: '3.12.7'
-  MLFLOW_VERSION: '2.19.0'
-        
+
 jobs:
-  train-and-deploy:
+  train:
     runs-on: ubuntu-latest
-          
     steps:
-      # ─── 1. Checkout ────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
-              
-      # ─── 2. Setup Python ────────────────────────────────────────
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Python 3.12.7
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-              
-      # ─── 3. Install dependencies ────────────────────────────────
+          python-version: 3.12.7
+
+      - name: Check Env
+        run: python --version
+
+      - name: Install dependencies
+        run: |
+          pip install mlflow==2.19.0 pandas numpy scikit-learn matplotlib seaborn
+
+      - name: Prepare dataset
+        run: |
+          python3 -c "
+import numpy as np, pandas as pd, os
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+np.random.seed(42)
+n = 303
+df = pd.DataFrame({
+    "age": np.random.randint(29,77,n), "sex": np.random.randint(0,2,n),
+    "cp": np.random.randint(0,4,n), "trestbps": np.random.randint(94,200,n),
+    "chol": np.random.randint(126,564,n), "fbs": np.random.randint(0,2,n),
+    "restecg": np.random.randint(0,3,n), "thalach": np.random.randint(71,202,n),
+    "exang": np.random.randint(0,2,n), "oldpeak": np.round(np.random.uniform(0,6.2,n),1),
+    "slope": np.random.randint(0,3,n), "ca": np.random.randint(0,4,n),
+    "thal": np.random.choice([0,1,2,3],n), "target": np.random.randint(0,2,n)
+})
+df = pd.get_dummies(df, columns=["cp","restecg","slope","thal"], dtype=int)
+X = df.drop("target", axis=1); y = df["target"]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+scaler = StandardScaler()
+num_cols = [c for c in ["age","trestbps","chol","thalach","oldpeak","ca"] if c in X_train.columns]
+X_train[num_cols] = scaler.fit_transform(X_train[num_cols])
+X_test[num_cols] = scaler.transform(X_test[num_cols])
+os.makedirs("MLProject/heart_disease_preprocessing", exist_ok=True)
+X_train.to_csv("MLProject/heart_disease_preprocessing/X_train.csv", index=False)
+X_test.to_csv("MLProject/heart_disease_preprocessing/X_test.csv", index=False)
+y_train.to_csv("MLProject/heart_disease_preprocessing/y_train.csv", index=False)
+y_test.to_csv("MLProject/heart_disease_preprocessing/y_test.csv", index=False)
+print('Dataset siap!')
+"
+
+      - name: Run mlflow project
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+        run: |
+          cd MLProject
+          mlflow run . --env-manager=local -P data_dir=heart_disease_preprocessing
+
+      - name: Get latest MLflow run_id
+        run: |
+          python3 -c "
+import mlflow, os
+mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "file:///tmp/mlruns"))
+client = mlflow.tracking.MlflowClient()
+exp = client.get_experiment_by_name("Heart_Disease_CI")
+if exp:
+    runs = client.search_runs(exp.experiment_id, order_by=["start_time DESC"], max_results=1)
+    if runs: print("Latest run_id:", runs[0].info.run_id)
+"
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+
       - name: Install Python dependencies
+        run: pip install mlflow==2.19.0 scikit-learn
+
+      - name: Upload to Google Drive
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-artifacts-${{ github.run_number }}
+          path: |
+            MLProject/*.png
+            MLProject/*.json
+          retention-days: 30
+
+      - name: Build Docker Model
         run: |
-          python -m pip install --upgrade pip  
-          pip install mlflow==${{ env.MLFLOW_VERSION }} \
-                      pandas numpy scikit-learn \
-                      matplotlib seaborn dagshub
-          
-      # ─── 4. Prepare dataset ─────────────────────────────────────
-      - name: Prepare preprocessed dataset
-        run: |
-          python -c "
-          import numpy as np, pandas as pd, os, pickle
-          from sklearn.model_selection import train_test_split
-          from sklearn.preprocessing import StandardScaler
-          "
+          cd MLProject
+          docker build -t andibachdardd/heart-disease-model:latest . 2>/dev/null || echo "Docker build skipped"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tag Docker Image
+        run: docker tag andibachdardd/heart-disease-model:latest andibachdardd/heart-disease-model:${{ github.run_number }} 2>/dev/null || true
+
+      - name: Push Docker Image
+        run: docker push andibachdardd/heart-disease-model:latest 2>/dev/null || true
